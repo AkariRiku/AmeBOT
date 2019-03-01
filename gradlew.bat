@@ -1,90 +1,192 @@
-@if "%DEBUG%" == "" @echo off
-@rem ##########################################################################
-@rem
-@rem  Gradle startup script for Windows
-@rem
-@rem ##########################################################################
+##########################################################################################
+#
+# Xposed framework installer zip.
+#
+# This script installs the Xposed framework files to the system partition.
+# The Xposed Installer app is needed as well to manage the installed modules.
+#
+##########################################################################################
 
-@rem Set local scope for the variables with windows NT shell
-if "%OS%"=="Windows_NT" setlocal
+grep_prop() {
+  REGEX="s/^$1=//p"
+  shift
+  FILES=$@
+  if [ -z "$FILES" ]; then
+    FILES='/system/build.prop'
+  fi
+  cat $FILES 2>/dev/null | sed -n $REGEX | head -n 1
+}
 
-@rem Add default JVM options here. You can also use JAVA_OPTS and GRADLE_OPTS to pass JVM options to this script.
-set DEFAULT_JVM_OPTS=
+android_version() {
+  case $1 in
+    15) echo '4.0 / SDK'$1;;
+    16) echo '4.1 / SDK'$1;;
+    17) echo '4.2 / SDK'$1;;
+    18) echo '4.3 / SDK'$1;;
+    19) echo '4.4 / SDK'$1;;
+    21) echo '5.0 / SDK'$1;;
+    22) echo '5.1 / SDK'$1;;
+    23) echo '6.0 / SDK'$1;;
+    24) echo '7.0 / SDK'$1;;
+    25) echo '7.1 / SDK'$1;;
+    26) echo '8.0 / SDK'$1;;
+    27) echo '8.1 / SDK'$1;;
+    *)  echo 'SDK'$1;;
+  esac
+}
 
-set DIRNAME=%~dp0
-if "%DIRNAME%" == "" set DIRNAME=.
-set APP_BASE_NAME=%~n0
-set APP_HOME=%DIRNAME%
+cp_perm() {
+  cp -f $1 $2 || exit 1
+  set_perm $2 $3 $4 $5 $6
+}
 
-@rem Find java.exe
-if defined JAVA_HOME goto findJavaFromJavaHome
+set_perm() {
+  chown $2:$3 $1 || exit 1
+  chmod $4 $1 || exit 1
+  if [ "$5" ]; then
+    chcon $5 $1 2>/dev/null
+  else
+    chcon 'u:object_r:system_file:s0' $1 2>/dev/null
+  fi
+}
 
-set JAVA_EXE=java.exe
-%JAVA_EXE% -version >NUL 2>&1
-if "%ERRORLEVEL%" == "0" goto init
+install_nobackup() {
+  cp_perm ./$1 $1 $2 $3 $4 $5
+}
 
-echo.
-echo ERROR: JAVA_HOME is not set and no 'java' command could be found in your PATH.
-echo.
-echo Please set the JAVA_HOME variable in your environment to match the
-echo location of your Java installation.
+install_and_link() {
+  TARGET=$1
+  XPOSED="${1}_xposed"
+  BACKUP="${1}_original"
+  if [ ! -f ./$XPOSED ]; then
+    return
+  fi
+  cp_perm ./$XPOSED $XPOSED $2 $3 $4 $5
+  if [ ! -f $BACKUP ]; then
+    mv $TARGET $BACKUP || exit 1
+    ln -s $XPOSED $TARGET || exit 1
+    chcon -h 'u:object_r:system_file:s0' $TARGET 2>/dev/null
+  fi
+}
 
-goto fail
+install_overwrite() {
+  TARGET=$1
+  if [ ! -f ./$TARGET ]; then
+    return
+  fi
+  BACKUP="${1}.orig"
+  NO_ORIG="${1}.no_orig"
+  if [ ! -f $TARGET ]; then
+    touch $NO_ORIG || exit 1
+    set_perm $NO_ORIG 0 0 600
+  elif [ -f $BACKUP ]; then
+    rm -f $TARGET
+    gzip $BACKUP || exit 1
+    set_perm "${BACKUP}.gz" 0 0 600
+  elif [ ! -f "${BACKUP}.gz" -a ! -f $NO_ORIG ]; then
+    mv $TARGET $BACKUP || exit 1
+    gzip $BACKUP || exit 1
+    set_perm "${BACKUP}.gz" 0 0 600
+  fi
+  cp_perm ./$TARGET $TARGET $2 $3 $4 $5
+}
 
-:findJavaFromJavaHome
-set JAVA_HOME=%JAVA_HOME:"=%
-set JAVA_EXE=%JAVA_HOME%/bin/java.exe
+##########################################################################################
 
-if exist "%JAVA_EXE%" goto init
+echo "**************************"
+echo "Xposed framework installer"
+echo "**************************"
 
-echo.
-echo ERROR: JAVA_HOME is set to an invalid directory: %JAVA_HOME%
-echo.
-echo Please set the JAVA_HOME variable in your environment to match the
-echo location of your Java installation.
+if [ ! -f "system/xposed.prop" ]; then
+  echo "! Failed: Extracted file system/xposed.prop not found!"
+  exit 1
+fi
 
-goto fail
+echo "- Checking environment"
+API=$(grep_prop ro.build.version.sdk)
+APINAME=$(android_version $API)
+ABI=$(grep_prop ro.product.cpu.abi | cut -c-3)
+ABI2=$(grep_prop ro.product.cpu.abi2 | cut -c-3)
+ABILONG=$(grep_prop ro.product.cpu.abi)
 
-:init
-@rem Get command-line arguments, handling Windowz variants
+XVERSION=$(grep_prop version system/xposed.prop)
+XARCH=$(grep_prop arch system/xposed.prop)
+XMINSDK=$(grep_prop minsdk system/xposed.prop)
+XMAXSDK=$(grep_prop maxsdk system/xposed.prop)
 
-if not "%OS%" == "Windows_NT" goto win9xME_args
-if "%@eval[2+2]" == "4" goto 4NT_args
+XEXPECTEDSDK=$(android_version $XMINSDK)
+if [ "$XMINSDK" != "$XMAXSDK" ]; then
+  XEXPECTEDSDK=$XEXPECTEDSDK' - '$(android_version $XMAXSDK)
+fi
 
-:win9xME_args
-@rem Slurp the command line arguments.
-set CMD_LINE_ARGS=
-set _SKIP=2
+ARCH=arm
+IS64BIT=
+if [ "$ABI" = "x86" ]; then ARCH=x86; fi;
+if [ "$ABI2" = "x86" ]; then ARCH=x86; fi;
+if [ "$API" -ge "21" ]; then
+  if [ "$ABILONG" = "arm64-v8a" ]; then ARCH=arm64; IS64BIT=1; fi;
+  if [ "$ABILONG" = "x86_64" ]; then ARCH=x86_64; IS64BIT=1; fi;
+fi
 
-:win9xME_args_slurp
-if "x%~1" == "x" goto execute
+# echo "DBG [$API] [$ABI] [$ABI2] [$ABILONG] [$ARCH] [$XARCH] [$XMINSDK] [$XMAXSDK] [$XVERSION]"
 
-set CMD_LINE_ARGS=%*
-goto execute
+echo "  Xposed version: $XVERSION"
 
-:4NT_args
-@rem Get arguments from the 4NT Shell from JP Software
-set CMD_LINE_ARGS=%$
+XVALID=
+if [ "$ARCH" = "$XARCH" ]; then
+  if [ "$API" -ge "$XMINSDK" ]; then
+    if [ "$API" -le "$XMAXSDK" ]; then
+      XVALID=1
+    else
+      echo "! Wrong Android version: $APINAME"
+      echo "! This file is for: $XEXPECTEDSDK"
+    fi
+  else
+    echo "! Wrong Android version: $APINAME"
+    echo "! This file is for: $XEXPECTEDSDK"
+  fi
+else
+  echo "! Wrong platform: $ARCH"
+  echo "! This file is for: $XARCH"
+fi
 
-:execute
-@rem Setup the command line
+if [ -z $XVALID ]; then
+  echo "! Please download the correct package"
+  echo "! for your platform/ROM!"
+  exit 1
+fi
 
-set CLASSPATH=%APP_HOME%\gradle\wrapper\gradle-wrapper.jar
+echo "- Placing files"
+install_nobackup /system/xposed.prop                      0    0 0644
+install_nobackup /system/framework/XposedBridge.jar       0    0 0644
 
-@rem Execute Gradle
-"%JAVA_EXE%" %DEFAULT_JVM_OPTS% %JAVA_OPTS% %GRADLE_OPTS% "-Dorg.gradle.appname=%APP_BASE_NAME%" -classpath "%CLASSPATH%" org.gradle.wrapper.GradleWrapperMain %CMD_LINE_ARGS%
+install_and_link  /system/bin/app_process32               0 2000 0755 u:object_r:zygote_exec:s0
+install_overwrite /system/bin/dex2oat                     0 2000 0755 u:object_r:dex2oat_exec:s0
+install_overwrite /system/bin/oatdump                     0 2000 0755
+install_overwrite /system/bin/patchoat                    0 2000 0755 u:object_r:dex2oat_exec:s0
+install_overwrite /system/lib/libart.so                   0    0 0644
+install_overwrite /system/lib/libart-compiler.so          0    0 0644
+install_overwrite /system/lib/libsigchain.so              0    0 0644
+install_nobackup  /system/lib/libxposed_art.so            0    0 0644
+if [ $IS64BIT ]; then
+  install_and_link  /system/bin/app_process64             0 2000 0755 u:object_r:zygote_exec:s0
+  install_overwrite /system/lib64/libart.so               0    0 0644
+  install_overwrite /system/lib64/libart-compiler.so      0    0 0644
+  install_overwrite /system/lib64/libart-disassembler.so  0    0 0644
+  install_overwrite /system/lib64/libsigchain.so          0    0 0644
+  install_nobackup  /system/lib64/libxposed_art.so        0    0 0644
+fi
 
-:end
-@rem End local scope for the variables with windows NT shell
-if "%ERRORLEVEL%"=="0" goto mainEnd
+mkdir -p /system/priv-app/XposedInstaller
+chmod 0755 /system/priv-app/XposedInstaller
+chcon -h u:object_r:system_file:s0 /system/priv-app/XposedInstaller
+cp system/priv-app/XposedInstaller/XposedInstaller.apk /system/priv-app/XposedInstaller/XposedInstaller.apk 
+chmod 0644 /system/priv-app/XposedInstaller/XposedInstaller.apk
+chcon -h u:object_r:system_file:s0 /system/priv-app/XposedInstaller/XposedInstaller.apk
 
-:fail
-rem Set variable GRADLE_EXIT_CONSOLE if you need the _script_ return code instead of
-rem the _cmd.exe /c_ return code!
-if  not "" == "%GRADLE_EXIT_CONSOLE%" exit 1
-exit /b 1
+if [ "$API" -ge "22" ]; then
+  find /system /vendor -type f -name '*.odex.gz' 2>/dev/null | while read f; do mv "$f" "$f.xposed"; done
+fi
 
-:mainEnd
-if "%OS%"=="Windows_NT" endlocal
-
-:omega
+echo "- Done"
+exit 0
